@@ -24,7 +24,7 @@
 | TL074-1 - TL074-2 | 2 | TL074 DIP | Quad Operational Amplifier (+ Socket) | Stock
 | MCP6002 | 1 | MCP6002 DIP | Dual Operational Amplifier (+ Socket) | IC WM2601060167<br>Skt WM2601060211
 | Q1 | 1 | 2N3904 | NPN Transistor | Stock
-| 7805 | 1 | L7805ABV | 5V Linear Voltage Regulator | Stock
+| 7805 | 1 | L7805ABV | 5V Linear Voltage Regulator | WM2601060230
 | | 1 | 11mm | M2.5 PCB Standoff + 2 Screws | ?
 | | 2 | T18 Shaft | Knobs | Stock
 | | 1 | 10 - 16 Pin | Eurorack Power Cable | Stock
