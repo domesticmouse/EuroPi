@@ -35,6 +35,7 @@ from machine import Timer
 
 import gc
 import math
+import micropython
 import time
 import random
 
@@ -295,11 +296,18 @@ DIN_MODE_TRIGGER = 'Trig'
 ## Reset on a rising edge, but don't start/stop the clock
 DIN_MODE_RESET = 'Reset'
 
+## External clock
+#
+#  The clock is assumed to be x1 input; we interpolate the BPM from
+#  the input and use that to set the master clock's frequency dynamically
+DIN_MODE_EXTERNAL = "Ext. Clk"
+
 ## Sorted list of DIN modes for display
 DIN_MODES = [
     DIN_MODE_GATE,
     DIN_MODE_TRIGGER,
-    DIN_MODE_RESET
+    DIN_MODE_RESET,
+    DIN_MODE_EXTERNAL,
 ]
 
 ## True/False labels for yes/no settings (e.g. mute)
@@ -332,6 +340,19 @@ BANK_LABELS = [
     "5",
     "6"
 ]
+
+
+@micropython.native
+def us2bpm(us, ppqn=1):
+    """Convert the length of a gate (rise-to-rise) to a BPM
+
+    @param us    The elapsed time in microseconds between consecutive rising edges
+    @param ppqn  The PPQN value for the clock
+
+    @return The equivalent BPM of the gate signal
+    """
+    us_per_quarter_note = us * ppqn
+    return 60000000.0 / us_per_quarter_note
 
 
 class BufferedAnalogueReader(AnalogueReader):
@@ -436,7 +457,7 @@ class MasterClock:
     MIN_BPM = 1
 
     ## The absolute fastest the clock can go
-    MAX_BPM = 240
+    MAX_BPM = 300
 
     def __init__(self, bpm):
         """Create the main clock to run at a given bpm
@@ -485,6 +506,7 @@ class MasterClock:
         for ch in channels:
             self.channels.append(ch)
 
+    @micropython.native
     def on_tick(self, timer):
         """Callback function for the timer's tick
         """
@@ -959,11 +981,13 @@ class PamsOutput:
         self.t_lock.is_visible = show_turing
         self.t_mode.is_visible = show_turing
 
+    @micropython.native
     def change_e_length(self, new_value=None, old_value=None, config_point=None, arg=None):
         self.e_trig.modify_choices(list(range(self.e_step.value+1)), self.e_step.value)
         self.e_rot.modify_choices(list(range(self.e_step.value+1)), self.e_step.value)
         self.recalculate_e_pattern()
 
+    @micropython.native
     def recalculate_e_pattern(self, new_value=None, old_value=None, config_point=None, arg=None):
         """Recalulate the euclidean pattern this channel outputs
         """
@@ -981,6 +1005,7 @@ class PamsOutput:
         self.real_clock_mod = self.clock_mod.mapped_value
         self.clock_mod_dirty = False
 
+    @micropython.native
     def square_wave(self, tick, n_ticks):
         """Calculate the [0, 1] value of a square wave with PWM
 
@@ -1005,6 +1030,7 @@ class PamsOutput:
         else:
             return 0.0
 
+    @micropython.native
     def triangle_wave(self, tick, n_ticks):
         """Calculate the [0, 1] value of a triangle wave
 
@@ -1033,6 +1059,7 @@ class PamsOutput:
             y = peak - step * (tick - rising_ticks)
         return y
 
+    @micropython.native
     def sine_wave(self, tick, n_ticks):
         """Calculate the [0, 1] value of a sine wave
 
@@ -1049,6 +1076,7 @@ class PamsOutput:
         s_theta = (math.sin(theta) + 1) / 2   # (sin(x) + 1)/2 since we can't output negative voltages
         return s_theta
 
+    @micropython.native
     def adsr_wave(self, tick, n_ticks):
         """Calculate the [0, 1] level of an ADSR envelope
 
@@ -1102,6 +1130,7 @@ class PamsOutput:
             # outside of the ADSR
             return 0.0
 
+    @micropython.native
     def turing_shift(self):
         """Shift the turing machine register by 1 bit
         """
@@ -1112,6 +1141,7 @@ class PamsOutput:
             incoming_bit = (self.turing_register >> (self.t_length.value - 1)) & 0x01
         self.turing_register = ((self.turing_register << 1) & 0xffff) | incoming_bit
 
+    @micropython.native
     def turing_wave(self, tick, n_ticks):
         """Calculate the [0, 1] output of a Turing Machine wave
 
@@ -1161,6 +1191,7 @@ class PamsOutput:
         for s in self.all_settings:
             s.reset_to_default()
 
+    @micropython.native
     def tick(self):
         """Advance the current pattern one tick and calculate the output voltage
 
@@ -1182,81 +1213,7 @@ class PamsOutput:
             # reset waves are always low; the clock's stop() function handles triggering them
             out_volts = 0.0
         else:
-            if self.wave_counter % 2 == 0:
-                # first half of the swing; if swing < 50% this is short, otherwise long
-                swing_amt = self.swing.value / 100.0
-            else:
-                # second half of the swing; if swing < 50% this is long, otherwise short
-                swing_amt = (100 - self.swing.value) / 100.0
-            ticks_per_note = round(2 * MasterClock.PPQN / self.real_clock_mod * swing_amt)
-            if ticks_per_note == 0:
-                # we're swinging SO HARD that one beat is squashed out of existence!
-                # move immediately to the other beat
-                self.e_position = self.e_position + 1
-                if self.e_position >= len(self.e_pattern):
-                    self.e_position = 0
-                ticks_per_note = round(2 * MasterClock.PPQN / self.real_clock_mod)
-
-            e_step = self.e_pattern[self.e_position]
-            wave_position = self.clock.elapsed_pulses % ticks_per_note
-            # are we starting a new repeat of the pattern?
-            rising_edge = (wave_position == int(self.phase.value * ticks_per_note / 100.0)) and e_step
-            # determine if we should skip this sample playback
-            if rising_edge:
-                self.skip_this_step = random.randint(0, 100) < self.skip.value
-                self.wave_counter += 1
-
-            wave_sample = int(e_step) * int (not self.skip_this_step)
-            if self.wave_shape.value == WAVE_RANDOM:
-                if rising_edge and not self.skip_this_step:
-                    wave_sample = random.random() * (self.amplitude.value / 100.0) + (self.width.value / 100.0)
-                else:
-                    wave_sample = self.previous_wave_sample
-            elif self.wave_shape.value == WAVE_AIN:
-                if rising_edge and not self.skip_this_step:
-                    wave_sample = CV_INS["AIN"].percent() * self.amplitude.value / 100.0
-                else:
-                    wave_sample = self.previous_wave_sample
-            elif self.wave_shape.value == WAVE_KNOB:
-                if rising_edge and not self.skip_this_step:
-                    wave_sample = CV_INS["KNOB"].percent() * self.amplitude.value / 100.0
-                else:
-                    wave_sample = self.previous_wave_sample
-            elif self.wave_shape.value == WAVE_SQUARE:
-                wave_sample = wave_sample * self.square_wave(wave_position, ticks_per_note) * (self.amplitude.value / 100.0)
-            elif self.wave_shape.value == WAVE_TRIANGLE:
-                wave_sample = wave_sample * self.triangle_wave(wave_position, ticks_per_note) * (self.amplitude.value / 100.0)
-            elif self.wave_shape.value == WAVE_SIN:
-                wave_sample = wave_sample * self.sine_wave(wave_position, ticks_per_note) * (self.amplitude.value / 100.0)
-            elif self.wave_shape.value == WAVE_ADSR:
-                wave_sample = wave_sample * self.adsr_wave(wave_position, ticks_per_note) * (self.amplitude.value / 100.0)
-            elif self.wave_shape.value == WAVE_TURING:
-                wave_sample = self.turing_wave(wave_position, ticks_per_note) * (self.amplitude.value / 100.0)
-            else:
-                wave_sample = 0.0
-
-            self.previous_wave_sample = wave_sample
-            out_volts = wave_sample * MAX_OUTPUT_VOLTAGE
-
-            if self.quantizer.mapped_value is not None:
-                (out_volts, note) = self.quantizer.mapped_value.quantize(out_volts, self.root.value)
-
-            if wave_position == ticks_per_note - 1:
-                if self.next_e_pattern:
-                    # if we just finished a waveform and we have a new euclidean pattern, start it
-                    # this will always line up with the current beat, but may be rotated relative to
-                    # other patterns currently playing.
-                    # rather than do a lot of math, treat this as a feature that if you change patterns
-                    # while playing, the new pattern starts right away instead of waiting for for the
-                    # end of (a potentially long, slow) pattern to finish
-                    self.e_position = 0
-                    self.e_pattern = self.next_e_pattern
-                    self.next_e_pattern = None
-                else:
-                    # if we've reached end of the euclidean pattern start it again
-                    self.e_position = self.e_position + 1
-                    if self.e_position >= len(self.e_pattern):
-                        self.e_position = 0
+            out_volts = self.wave_gen()
 
         # If the clock modifier was changed, apply the new value now
         if self.clock_mod_dirty:
@@ -1264,6 +1221,91 @@ class PamsOutput:
 
         self.out_volts = out_volts
 
+    @micropython.native
+    def wave_gen(self):
+        """Calculates the output voltage for the output channel.
+
+        @return The desired output voltage to be applied
+        """
+        if self.wave_counter % 2 == 0:
+            # first half of the swing; if swing < 50% this is short, otherwise long
+            swing_amt = self.swing.value / 100.0
+        else:
+            # second half of the swing; if swing < 50% this is long, otherwise short
+            swing_amt = (100 - self.swing.value) / 100.0
+        ticks_per_note = round(2 * MasterClock.PPQN / self.real_clock_mod * swing_amt)
+        if ticks_per_note == 0:
+            # we're swinging SO HARD that one beat is squashed out of existence!
+            # move immediately to the other beat
+            self.e_position = self.e_position + 1
+            if self.e_position >= len(self.e_pattern):
+                self.e_position = 0
+            ticks_per_note = round(2 * MasterClock.PPQN / self.real_clock_mod)
+
+        e_step = self.e_pattern[self.e_position]
+        wave_position = self.clock.elapsed_pulses % ticks_per_note
+        # are we starting a new repeat of the pattern?
+        rising_edge = (wave_position == int(self.phase.value * ticks_per_note / 100.0)) and e_step
+        # determine if we should skip this sample playback
+        if rising_edge:
+            self.skip_this_step = random.randint(0, 100) < self.skip.value
+            self.wave_counter += 1
+
+        wave_sample = int(e_step) * int (not self.skip_this_step)
+        if self.wave_shape.value == WAVE_RANDOM:
+            if rising_edge and not self.skip_this_step:
+                wave_sample = random.random() * (self.amplitude.value / 100.0) + (self.width.value / 100.0)
+            else:
+                wave_sample = self.previous_wave_sample
+        elif self.wave_shape.value == WAVE_AIN:
+            if rising_edge and not self.skip_this_step:
+                wave_sample = CV_INS["AIN"].percent() * self.amplitude.value / 100.0
+            else:
+                wave_sample = self.previous_wave_sample
+        elif self.wave_shape.value == WAVE_KNOB:
+            if rising_edge and not self.skip_this_step:
+                wave_sample = CV_INS["KNOB"].percent() * self.amplitude.value / 100.0
+            else:
+                wave_sample = self.previous_wave_sample
+        elif self.wave_shape.value == WAVE_SQUARE:
+            wave_sample = wave_sample * self.square_wave(wave_position, ticks_per_note) * (self.amplitude.value / 100.0)
+        elif self.wave_shape.value == WAVE_TRIANGLE:
+            wave_sample = wave_sample * self.triangle_wave(wave_position, ticks_per_note) * (self.amplitude.value / 100.0)
+        elif self.wave_shape.value == WAVE_SIN:
+            wave_sample = wave_sample * self.sine_wave(wave_position, ticks_per_note) * (self.amplitude.value / 100.0)
+        elif self.wave_shape.value == WAVE_ADSR:
+            wave_sample = wave_sample * self.adsr_wave(wave_position, ticks_per_note) * (self.amplitude.value / 100.0)
+        elif self.wave_shape.value == WAVE_TURING:
+            wave_sample = self.turing_wave(wave_position, ticks_per_note) * (self.amplitude.value / 100.0)
+        else:
+            wave_sample = 0.0
+
+        self.previous_wave_sample = wave_sample
+        out_volts = wave_sample * MAX_OUTPUT_VOLTAGE
+
+        if self.quantizer.mapped_value is not None:
+            (out_volts, note) = self.quantizer.mapped_value.quantize(out_volts, self.root.value)
+
+        if wave_position == ticks_per_note - 1:
+            if self.next_e_pattern:
+                # if we just finished a waveform and we have a new euclidean pattern, start it
+                # this will always line up with the current beat, but may be rotated relative to
+                # other patterns currently playing.
+                # rather than do a lot of math, treat this as a feature that if you change patterns
+                # while playing, the new pattern starts right away instead of waiting for for the
+                # end of (a potentially long, slow) pattern to finish
+                self.e_position = 0
+                self.e_pattern = self.next_e_pattern
+                self.next_e_pattern = None
+            else:
+                # if we've reached end of the euclidean pattern start it again
+                self.e_position = self.e_position + 1
+                if self.e_position >= len(self.e_pattern):
+                    self.e_position = 0
+
+        return out_volts
+
+    @micropython.native
     def apply(self):
         """Apply the calculated voltage to the output channel
 
@@ -1354,6 +1396,10 @@ class PamsWorkout2(EuroPiScript):
         # Are UI elements _not_ managed by the main menu dirty?
         self.ui_dirty = True
 
+        # create the clock first; we need to assign its callbacks
+        # to other settings later
+        self.clock = MasterClock(120)
+
         self.din_mode = SettingMenuItem(
             config_point = ChoiceConfigPoint(
                 "din",
@@ -1361,10 +1407,9 @@ class PamsWorkout2(EuroPiScript):
                 DIN_MODE_GATE
             ),
             prefix = "Clk",
-            title = "DIN Mode"
+            title = "DIN Mode",
         )
 
-        self.clock = MasterClock(120)
         self.channels = [
             PamsOutput(cv1, self.clock, 1),
             PamsOutput(cv2, self.clock, 2),
@@ -1460,6 +1505,16 @@ class PamsWorkout2(EuroPiScript):
         )
         self.main_menu.load_defaults(self._state_filename)
 
+        ## Keep an array of the last few intervals between incoming external clock signals
+        #
+        #  Initially 1 microsecond just to avoid division-by-zero issues; 1us won't cause significant issues with the
+        #  timing for most applications
+        self.external_clock_intervals_us = [1] * 2
+        self.next_external_clock_index = 0
+
+        ## The time we received the last external clock signal in microseconds
+        self.last_external_clock_at_us = time.ticks_us()
+
         @din.handler
         def on_din_rising():
             if self.din_mode.value == DIN_MODE_GATE:
@@ -1467,6 +1522,18 @@ class PamsWorkout2(EuroPiScript):
             elif self.din_mode.value == DIN_MODE_RESET:
                 for ch in self.channels:
                     ch.reset()
+            elif self.din_mode.value == DIN_MODE_EXTERNAL:
+                now = time.ticks_us()
+                self.external_clock_intervals_us[self.next_external_clock_index] = time.ticks_diff(now, self.last_external_clock_at_us)
+                self.last_external_clock_at_us = now
+                self.next_external_clock_index = self.next_external_clock_index + 1
+                if self.next_external_clock_index == len(self.external_clock_intervals_us):
+                    self.next_external_clock_index = 0
+
+                # to keep the internal & external clocks from de-syncing too much, hard-sync
+                # the internal clock to the nearest beat
+                self.clock.elapsed_pulses = self.clock.PPQN * round(self.clock.elapsed_pulses / self.clock.PPQN)
+
             else:
                 if self.clock.is_running:
                     self.clock.stop()
@@ -1536,6 +1603,7 @@ class PamsWorkout2(EuroPiScript):
     def bank_filename(self, bank):
         return f'saved_state_{self.__class__.__qualname__}_{bank.lower().replace(" ", "_")}.json'
 
+    @micropython.native
     def main(self):
         prev_k1 = CV_INS["KNOB"].percent()
         prev_k2 = k2_bank.current.percent()
@@ -1547,13 +1615,34 @@ class PamsWorkout2(EuroPiScript):
             current_k1 = CV_INS["KNOB"].percent()
             current_k2 = k2_bank.current.percent()
 
+            # Handle dynamic BPM calculations based on the external clock
+            if self.din_mode.value == DIN_MODE_EXTERNAL:
+                avg_duration = sum(self.external_clock_intervals_us) / len(self.external_clock_intervals_us)
+                bpm = round(us2bpm(avg_duration, 1))
+                if bpm < MasterClock.MIN_BPM:
+                    bpm = MasterClock.MIN_BPM
+                elif bpm > MasterClock.MAX_BPM:
+                    bpm = MasterClock.MAX_BPM
+
+                if bpm != self.clock.bpm.value:
+                    self.clock.bpm.choose(bpm - MasterClock.MIN_BPM)  # convert to a 0-based index, allowed range is [1, MAX_BPM]
+                    self.clock.bpm.display_override = f"{bpm} (Ext)"
+                    self.ui_dirty = True
+            else:
+                self.clock.bpm.display_override = None
+
             # wake up from the screensaver if we rotate a knob
             if abs(current_k1 - prev_k1) > 0.02 or abs(current_k2 - prev_k2) > 0.02:
                 self.ui_dirty = True
                 ssoled.notify_user_interaction()
 
             # only re-render the UI if necessary
-            if self.main_menu.ui_dirty or self.ui_dirty:
+            if self.ui_dirty and self.clock.bpm.display_override and self.main_menu.active_item == self.clock.bpm:
+                # re-draw if the external BPM needs updating, but don't suppress the screensaver
+                ssoled.fill(0)
+                self.main_menu.draw(ssoled)
+                self.ui_dirty = False
+            elif self.main_menu.ui_dirty or self.ui_dirty:
                 ssoled.notify_user_interaction()
                 ssoled.fill(0)
                 self.main_menu.draw(ssoled)
@@ -1573,7 +1662,7 @@ class PamsWorkout2(EuroPiScript):
                 self.main_menu.save(self._state_filename)
 
             prev_k1 = current_k1
-            prev_k2 = prev_k2
+            prev_k2 = current_k2
 
 if __name__=="__main__":
     PamsWorkout2().main()
