@@ -8,7 +8,7 @@ If you want to build this version of the EuroPi, you can buy the PCB directly fr
     ![IMG_4544](https://github.com/user-attachments/assets/a3283c42-c10b-4cab-80d6-dbe6f63b6ec0)
 1. Solder the jacks and potentiometers from the back, making sure they're properly aligned with the panel and not at a funny angle.
 1. Now solder the buttons, taking care to make sure they're pushed against the PCB while doing so - they might try to fall out so it can help to just solder one pin first and keep the solder hot with your iron while you position it, and only solder the other 3 pins once you're happy.
-1. To solder the LEDs, use the one pin trick again: solder just one pin of each LED and then push the LED flush with the panel with one hand while using the other to hold the soldering iron, keeping that pins solder molten.
+1. To solder the LEDs, use the one pin trick again: solder just one pin of each LED and then push the LED flush with the panel with one hand while using the other to hold the soldering iron, keeping that pins solder molten. The shorter leg of the LED (negative) goes in the hole with the white fill around it.
 1. Finally solder the remaining pins of each LED (and the buttons if you only soldered one pin of each of those)
 
     ![IMG_4546](https://github.com/user-attachments/assets/fcc6625f-eacf-44f8-8927-24b103c9de45)
